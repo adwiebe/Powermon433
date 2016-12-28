@@ -22,22 +22,52 @@
  General messing about and reformatting 
  by Stewart C. Russell, scruss.com
  https://github.com/scruss/Powermon433
+
+ Dec 2016 - added the following features
+ -- store TX_ID in EPROM (prevents need to reset after every power failure)
+ -- mechanical lock out switch to replace TX_ID_LOCK
+ -- use status LED (pin 13) for
+ ---- heartbeat - blink every timeout
+ ---- looking ID - double blink
+ ---- found ID - tripple blink
  
  */
 
 #include <util/atomic.h>
-#include "rf69_ook.h"
+#include <EEPROM.h>
+// Remove rf69_ook.h - not using that 
+// #include "rf69_ook.h"
 #include "temp_lerp.h"
+
+#define POWERFACTOR         7.2
 
 // the pin connected to the receiver output
 #define DPIN_OOK_RX         8
 
+// Status LEDs and colours
+#define DPIN_STATUS         13
+#define DPIN_GRN_LED        11
+#define DPIN_RED_LED        12
+#define STATUS_OFF          0
+#define STATUS_RED          1
+#define STATUS_GREEN        2
+#define STATUS_ORANGE       3
+
+#define STATE_GOOD          1
+#define STATE_CRCERR        2
+#define STATE_MISSED        3
+#define STATE_ID_SYNC_ON    4
+#define STATE_ID_RECD       5
+
 /*
  The default ID of the transmitter to decode from
+ is whatever random bytes are in EEPROM addr 0&1
  - it is likely that yours is different.
- see README.md on how to check yours and set it here.
+ Jumper this PIN to HIGH, then press RESET on the
+ transmitter. Once Status LED is single blinking 
+ and/or colour LED is Green, jumper can be removed.
  */
-#define DEFAULT_TX_ID 0xfff8
+#define DPIN_SYNC           5
 
 /*
  TX_ID_LOCK - 
@@ -81,14 +111,10 @@ decoder;
 static int8_t g_RxTemperature;
 static uint8_t g_RxFlags;
 static uint16_t g_RxWatts;
-static uint16_t g_RxWattHours;
+static uint32_t g_RxWattHours;
 
-// Watt-hour counter rolls over every 65.536 kWh, 
-// or roughly 2½ days of my use.
-// This should be good for > 4 GWh; enough for everyone ...
 static unsigned long g_TotalRxWattHours;
-// need this too
-static uint16_t g_PrevRxWattHours;
+static uint32_t g_PrevRxWattHours;
 
 // better stats on time between reports
 // delta is long as packets are appx ½ range of uint16_t
@@ -99,7 +125,6 @@ static unsigned long g_PrintTimeDelta_ms;
 
 static bool g_RxDirty;
 static uint32_t g_RxLast;
-static uint8_t g_RxRssi;
 
 #if DPIN_OOK_RX >= 14
 #define VECT PCINT1_vect
@@ -108,6 +133,24 @@ static uint8_t g_RxRssi;
 #else
 #define VECT PCINT2_vect
 #endif
+
+void BlinkStatusLED(int cnt, int clr=STATUS_OFF)
+{
+  digitalWrite(DPIN_GRN_LED, clr & STATUS_GREEN);
+  digitalWrite(DPIN_RED_LED, clr & STATUS_RED);
+  // Orange is both Green & Red on together
+  
+  for (int x=0; x<cnt; x++)
+  {
+    digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
+    delay(100);                       // wait for a second
+    digitalWrite(LED_BUILTIN, LOW);    // turn the LED off by making the voltage LOW
+    delay(250);  
+  }
+
+  delay(2500); // Wait 2.5 seconds before allowing next status to be displayed.
+}
+
 
 volatile uint16_t pulse_433;
 
@@ -198,7 +241,6 @@ static bool decodeRxPulse(uint16_t width)
     // The only "extra long" long signals the end of the preamble
     if (width > 1200)
     {
-      rf69ook_startRssi();
       resetDecoder();
       return false;
     }
@@ -239,22 +281,18 @@ static void decodePowermon(uint16_t val16)
   {
   case OOK_PACKET_INSTANT:
     // val16 is the number of milliseconds between blinks
-    // Each blink is one watt hour consumed
-    g_RxWatts = 3600000UL / val16;
+    // Each blink is one meter unit consumed (typically 1 Wh, but check your Power Factor
+    g_RxWatts = (3600000UL / val16) * POWERFACTOR;
     break;
 
   case OOK_PACKET_TEMP:
-#if defined(TEMPERATURE_F)
-    g_RxTemperature = (int8_t)(temp_lerp(decoder.data[1]));
-#else
     g_RxTemperature = (int8_t)(fudged_f_to_c(temp_lerp(decoder.data[1])));
-#endif /* TEMPERATURE_F */
     g_RxFlags = decoder.data[0];
     break;
 
   case OOK_PACKET_TOTAL:
     g_PrevRxWattHours = g_RxWattHours;
-    g_RxWattHours = val16;
+    g_RxWattHours = val16 * POWERFACTOR;
     // prevent rollover through the power of unsigned arithmetic
     g_TotalRxWattHours += (g_RxWattHours - g_PrevRxWattHours);
     break;
@@ -265,15 +303,18 @@ static void decodeRxPacket(void)
 {
 
   uint16_t val16 = *(uint16_t *)decoder.data;
-#ifndef TX_ID_LOCK
-  if (crc8(decoder.data, 3) == 0)
-  {
-    g_TxId = decoder.data[1] << 8 | decoder.data[0];
-    Serial.print(F("# New ID: 0x"));
-    Serial.println(val16, HEX);
-    return;
+  if (digitalRead(DPIN_SYNC) == HIGH) {
+    BlinkStatusLED(STATE_ID_SYNC_ON, STATUS_ORANGE);
+    if (crc8(decoder.data, 3) == 0)
+    {
+      g_TxId = decoder.data[1] << 8 | decoder.data[0];
+      StoreTXID(g_TxId);
+      Serial.print(F("# New ID: 0x"));
+      Serial.println(val16, HEX);
+      BlinkStatusLED(STATE_ID_RECD, STATUS_ORANGE);
+      return;
+    }
   }
-#endif /* ifndef TX_ID_LOCK */
 
   val16 -= g_TxId;
   decoder.data[0] = val16 & 0xff;
@@ -287,6 +328,7 @@ static void decodeRxPacket(void)
   else
   {
     Serial.println(F("# CRC ERR"));
+    BlinkStatusLED(STATE_CRCERR, STATUS_RED);    
   }
 }
 
@@ -307,7 +349,6 @@ static void ookRx(void)
   {
     if (decodeRxPulse(v) == 1)
     {
-      g_RxRssi = rf69ook_Rssi();
       decodeRxPacket();
       resetDecoder();
     }
@@ -330,40 +371,66 @@ static void ookRx(void)
 
     Serial.print(F("PrintDelta_ms: ")); 
     Serial.print(g_PrintTimeDelta_ms, DEC);
-    // this can roll over, so don't print   
-    // Serial.print(F(" Energy_Wh: ")); 
-    // Serial.print(g_RxWattHours, DEC);  
+    Serial.print(F(" Energy_Wh: ")); 
+    Serial.print(g_RxWattHours, DEC);  
     Serial.print(F(" Total_Energy_Wh: ")); 
     Serial.print(g_TotalRxWattHours, DEC);
     Serial.print(F(" Power_W: ")); 
     Serial.print(g_RxWatts, DEC);
-#if defined(TEMPERATURE_F)
-    Serial.print(F(" Temp_F: "));
-#else 
     Serial.print(F(" Temp_C: "));
-#endif /* TEMPERATURE_F */ 
-    Serial.println(g_RxTemperature, DEC);
+    Serial.print(g_RxTemperature, DEC);
+    Serial.print(F(" Flags: "));
+    Serial.println(g_RxFlags, BIN);
 
+    BlinkStatusLED(STATE_GOOD, STATUS_GREEN);
+    
     g_RxDirty = false;
   }
   else if (g_RxLast != 0 && (millis() - g_RxLast) > 32000U) { 
     Serial.println(F("# Missed Packet"));
     g_RxLast = millis();
+    BlinkStatusLED(STATE_MISSED,STATUS_RED);
   }
 }
 
-void setup() {
-  Serial.begin(38400);
-  Serial.println(F("# Powermon433 built "__DATE__" "__TIME__));
-  Serial.print(F("# Listening for Sensor ID: 0x"));
-  Serial.println(DEFAULT_TX_ID, HEX);
+void StoreTXID(uint16_t ID)
+{
+  uint8_t b1, b2;
 
-  if (rf69ook_init())
-    Serial.println(F("# RF69 initialized"));
+  b1 = ID;
+  b2 = ID/256;
+
+  EEPROM.write(0,b1);
+  EEPROM.write(1,b2);
+  
+}
+
+uint16_t RetrieveTXID()
+{
+  uint8_t b1,b2;
+
+  b1 = EEPROM.read(0);
+  b2 = EEPROM.read(1);
+
+  return b1 + (b2 * 256);
+}
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(DPIN_GRN_LED, OUTPUT);
+  pinMode(DPIN_RED_LED, OUTPUT);
+  pinMode(DPIN_SYNC, INPUT);
+ 
+  BlinkStatusLED(5, STATUS_OFF);
+
+  g_TxId = RetrieveTXID();
+  Serial.begin(38400);
+  Serial.print(F("# Powermon433 built "__DATE__" "__TIME__));
+  Serial.print(F("# Listening for Sensor ID: 0x"));
+  Serial.println(g_TxId, HEX);
 
   rxSetup();
 
-  g_TxId = DEFAULT_TX_ID;
   g_TotalRxWattHours = 0;
   g_PrintTimeDelta_ms = 0;
   g_PrintTime_ms = 0;
@@ -373,12 +440,4 @@ void loop()
 {
   ookRx();
 }
-
-
-
-
-
-
-
-
 
