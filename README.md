@@ -13,10 +13,7 @@ usage instructions.
 
 Tested with:
 
-* OSEPP (Arduino) Fio + RFM69W (3.3 V logic, FTDI serial interface
-  required)
-* Arduino Uno + RX3400-LF-based superheterodyne receiver (5 V logic)
-* Arduino Uno + Parallax 433 MHz RF Transceiver (#27982) (5 V logic)
+* Arduino Nano + Geetech superheterodyne receiver
 
 A working PowerCost Monitor™ or Power Monitor EM100B (the meter
 transmitter is identical) installation is assumed.
@@ -26,30 +23,19 @@ transmitter is identical) installation is assumed.
 1. Wire up one of the “Tested with” options above, according to the
    receiver notes below. The Arduino + superhet receiver option is
    cheapest (but has a minor fiddle with trimming the wire antenna to
-   length), the Arduino + Parallax transceiver is simplest (but
-   expensive), and the Fio + RFM69W is fiddliest, mid-priced, but has
-   a lovely robust receiver.
+   length)
 2. Upload the included sketch, and open the serial monitor or serial
-   terminal (38400, 8N1). You should soon see some **CRC ERR**
+   terminal (38400, 8N1). You should soon see some **# CRC ERR**
    messages scroll by, a couple a minute or so.
-3. Go out to your meter, and briefly press the button on the monitor
+3. Pull up Pin 5 to HIGH (5V -> 1K -> D5) (install jumper on my setup)
+4. Go out to your meter, and briefly press the button on the monitor
    sensor. The red LED in the battery window should start to flash.
-4. You *should* see a **New ID** message in the output,
+5. You *should* see a **New ID** message in the output,
    followed by a hexadecimal number. The CRC ERR messages should soon
    be replaced with energy (Wh), instantaneous power (W) and outside
    temperature readings. Energy and temperature take a couple of
    minutes to come in, so will start at zero.
-5. (*Optional, recommended*) Note down the device ID, and change the
-   `#define DEFAULT_TX_ID 0xfff8` line in the Arduino sketch to use
-   your device ID. This way, your installation will default to
-   decoding your meter, and won't need the monitor button pressed
-   every time you restart your Arduino. Once you're satisfied that you
-   have your ID set correctly, you may wish to ‘lock’ the ID by
-   uncommenting the `#define TX_ID_LOCK` line and re-uploading the
-   sketch to your Arduino.
-6. (*Optional, at-best-tolerated*) If you *must* use °F, uncomment the
-   `#define TEMPERATURE_F` line. But don't blame me if you get haunted
-   by ghostly 18th century European oxter guff …
+6. Remove jumper from Pin 5 (should be tied to GND via 10K pull down)
 
 If you're having difficulties, Bryan's original sketch prints more
 diagnostic messages than this one. If you are using a wire antenna,
@@ -66,6 +52,9 @@ but:
 If you don't want to use an RFM69, you really want to use a
 superheterodyne 433.92 MHz receiver instead of a super-regenerative
 receiver board.
+
+(Note: RFM69 code was removed from this fork since the PINS in that code
+are being used for LED status indicators)
 
 A superheterodyne board:
 
